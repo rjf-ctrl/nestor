@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 data/*.csv
 project.md
+live-telemetry/include/vmlinux.h
+docs/
