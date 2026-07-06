@@ -5,11 +5,15 @@
 
 
 #include <bpf/libbpf.h>
+#include <bpf/bpf.h>
+#include "telemetry.h"
+#include "../ebpf/include/collector.h"
 
 #define BPF_OBJECT_PATH "../ebpf/build/collector.bpf.o"
 
 //keep them global to clean up on exit
-static struct bpf_object *obj = NULL;   
+static struct bpf_object *obj = NULL; 
+static struct ring_buffer *rb = NULL;
 
 static struct bpf_link *insert_link = NULL;
 static struct bpf_link *complete_link = NULL;
@@ -24,6 +28,15 @@ static void handle_signal(int sig)
     exiting = 1;
 }
 
+static int handle_event(void *ctx, void *data, size_t data_sz)
+{
+    struct nestor_event *event = data;
+    if (data_sz != sizeof(*event)) return 0;
+
+    telemetry_process_event(event);
+
+    return 0;
+}
 
 int main(void)
 {
@@ -56,8 +69,6 @@ int main(void)
     printf("Successfully loaded BPF object.\n");
 
     insert_prog = bpf_object__find_program_by_name(obj,"handle_insert");
-
-    
 
     if (!insert_prog) {
         fprintf(stderr, "Couldn't find handle_insert\n");
@@ -93,10 +104,53 @@ int main(void)
 
     printf("Successfully attached both tracepoints.\n");
 
-    while (!exiting)
-        sleep(1);
+    struct bpf_map *events_map;
+    int events_fd;
+
+    events_map = bpf_object__find_map_by_name(obj, "events");
+
+    if (!events_map) {
+        fprintf(stderr, "Couldn't find events map\n");
+        bpf_object__close(obj);
+        return EXIT_FAILURE;
+    }
+
+    events_fd = bpf_map__fd(events_map);
+
+    rb = ring_buffer__new(
+    events_fd,
+    handle_event,
+    NULL,
+    NULL    
+    );
+
+    if (!rb) {
+    fprintf(stderr, "Failed to create ring buffer\n");
+    bpf_object__close(obj);
+    return EXIT_FAILURE;
+    }
+
+    telemetry_init();
+
+
+    while (!exiting) {
+        int err = ring_buffer__poll(rb, 100);
+
+    if (err < 0) {
+        fprintf(stderr, "Ring buffer polling failed: %d\n", err);
+        break;
+    }
+    
+    __u32 key = 0;
+    __u64 dropped = 0;
+
+    }
+    
+    telemetry_cleanup();
 
     printf("\nStopping collector...\n");
+
+    ring_buffer__free(rb);
 
     bpf_link__destroy(insert_link);
     bpf_link__destroy(complete_link);

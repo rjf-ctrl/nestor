@@ -1,6 +1,9 @@
 #ifndef __COLLECTOR_H
 #define __COLLECTOR_H
 
+#ifndef __BPF__
+#include <linux/types.h>
+#endif
 
 /*
  * Operation type.
@@ -24,6 +27,8 @@ struct nestor_event {
     __u64 sector;
     __u32 bytes;
     __u8 op;
+    __u32 queue_depth;
+    char disk_name[32];
 };
 
 #endif /* __COLLECTOR_H */
