@@ -1,12 +1,18 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <stdbool.h>
+#include <sys/stat.h>
 
 #include "telemetry.h"
 
 #define WINDOW_NS 1000000000ULL
+#define CSV_PATH "nestor_dataset.csv"
+#define JSON_PATH "telemetry.jsonl"
 #define MAX_DEVICES 16
 #define MAX_LATENCY_SAMPLES 20000
 #define BURST_HISTORY 30
@@ -22,6 +28,9 @@ static int compare_u32(const void *a, const void *b){
 }
 
 static FILE *json_file = NULL;
+static FILE *csv_file = NULL;
+static bool json_debug_enabled = false;
+static char g_workload_class[64] = "unlabeled";
 
 
 struct window_request {
@@ -59,6 +68,7 @@ struct telemetry_state {
 
     __u32 history_count;
     __u32 history_index;
+    __u32 window_number;
 
     __u64 queue_depth_sum;
     __u64 queue_depth_samples;
@@ -375,6 +385,60 @@ static void write_features_json(const struct telemetry_state *stats,
 
 }
 
+static void write_csv_header(void)
+{
+    fprintf(csv_file,
+        "workload_class,read_iops,write_iops,"
+        "read_throughput_mb,write_throughput_mb,avg_request_size,"
+        "avg_latency_us,read_sequential_ratio,write_sequential_ratio,"
+        "p50_latency_us,p95_latency_us,p99_latency_us,avg_queue_depth,"
+        "read_write_ratio,burstiness,other_iops,avg_other_latency_us\n");
+    fflush(csv_file);
+}
+
+//--------------------------------------------------------------------------------------------------------
+
+/* One CSV row per 1-second telemetry window - this is the training
+ * dataset. Labeled with g_workload_class so windows collected under
+ * a known fio workload can be used as ground truth. */
+static void write_features_csv(const struct telemetry_state *stats,
+                               const struct telemetry_snapshot *snapshot,
+                               __u64 window_start_ns)
+{
+    (void)stats;
+    (void)window_start_ns;
+
+    if (!csv_file)
+        return;
+
+    if (strcmp(g_workload_class, "unlabeled") == 0)
+        return;
+
+    fprintf(csv_file,
+        "%s,%llu,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%.3f\n",
+        g_workload_class,
+        (unsigned long long)snapshot->read_iops,
+        (unsigned long long)snapshot->write_iops,
+        snapshot->read_throughput_mb,
+        snapshot->write_throughput_mb,
+        snapshot->avg_request_size,
+        snapshot->avg_latency_us,
+        snapshot->read_sequential_ratio,
+        snapshot->write_sequential_ratio,
+        snapshot->p50_latency_us,
+        snapshot->p95_latency_us,
+        snapshot->p99_latency_us,
+        snapshot->avg_queue_depth,
+        snapshot->read_write_ratio,
+        snapshot->burstiness,
+        (unsigned long long)snapshot->other_iops,
+        snapshot->avg_other_latency_us);
+
+    fflush(csv_file);
+}
+
+//--------------------------------------------------------------------------------------------------------
+
 static void reset_window(struct telemetry_state *stats)
 {
     /* keep window_start_ns as-is (caller advances it) */
@@ -401,16 +465,46 @@ static void reset_window(struct telemetry_state *stats)
 }
 
     
-void telemetry_init(void)
+void telemetry_init(const char *workload_class)
 {
     printf("Telemetry initialized.\n");
     srand((unsigned int)time(NULL));
-    json_file = fopen("telemetry.jsonl", "a");
-    if (!json_file) {
-        fprintf(stderr, "Failed to open telemetry file %s\n", "telemetry.jsonl");
-        return;
+
+    if (workload_class && workload_class[0] != '\0') {
+        strncpy(g_workload_class, workload_class, sizeof(g_workload_class) - 1);
+        g_workload_class[sizeof(g_workload_class) - 1] = '\0';
     }
 
+    if (strcmp(g_workload_class, "unlabeled") == 0) {
+        printf("Ignoring unlabeled run; CSV output disabled.\n");
+        csv_file = NULL;
+    } else {
+        /* Check size before opening in append mode so we know whether this
+         * is a fresh file (needs a header) or one we're appending more
+         * samples to (header already there from a previous run). */
+        struct stat st;
+        bool csv_has_content = (stat(CSV_PATH, &st) == 0 && st.st_size > 0);
+
+        csv_file = fopen(CSV_PATH, "a");
+        if (!csv_file) {
+            fprintf(stderr, "Failed to open dataset file %s\n", CSV_PATH);
+        } else if (!csv_has_content) {
+            write_csv_header();
+        }
+    }
+
+    /* JSON output is for debugging only now that CSV is the dataset
+     * format - opt in with NESTOR_JSON_DEBUG=1 rather than always
+     * paying the extra fopen/fprintf/fflush cost. */
+    if (getenv("NESTOR_JSON_DEBUG")) {
+        json_file = fopen(JSON_PATH, "a");
+        if (!json_file) {
+            fprintf(stderr, "Failed to open telemetry file %s\n", JSON_PATH);
+        } else {
+            json_debug_enabled = true;
+            printf("JSON debug output enabled: %s\n", JSON_PATH);
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------------
@@ -440,10 +534,16 @@ void telemetry_process_event(const struct nestor_event *event)
         if (stats->history_count < BURST_HISTORY)
             stats->history_count++;
         
-        struct telemetry_snapshot features = telemetry_features(stats);
-        
-        //print_features(stats, &features);
-        write_features_json(stats, &features, stats->window_start_ns - WINDOW_NS);
+        stats->window_number++;
+        if (stats->window_number > 1) {
+            struct telemetry_snapshot features = telemetry_features(stats);
+            
+            //print_features(stats, &features);
+            write_features_csv(stats, &features, stats->window_start_ns - WINDOW_NS);
+
+            if (json_debug_enabled)
+                write_features_json(stats, &features, stats->window_start_ns - WINDOW_NS);
+        }
         
         reset_window(stats);
     }
@@ -516,6 +616,35 @@ void telemetry_process_event(const struct nestor_event *event)
 void telemetry_cleanup(void)
 {
     printf("Telemetry stopped.\n");
-    fclose(json_file);
-    json_file = NULL;
+
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        __u64 now_ns = (__u64)ts.tv_sec * 1000000000ULL + (__u64)ts.tv_nsec;
+
+        for (int i = 0; i < num_devices; ++i) {
+            struct telemetry_state *stats = &devices[i];
+            if (stats->disk_name[0] == '\0' || stats->request_count == 0)
+                continue;
+
+            if (stats->window_start_ns != 0 && now_ns - stats->window_start_ns >= WINDOW_NS) {
+                stats->window_number++;
+                if (stats->window_number > 1) {
+                    struct telemetry_snapshot features = telemetry_features(stats);
+                    write_features_csv(stats, &features, stats->window_start_ns);
+                    if (json_debug_enabled)
+                        write_features_json(stats, &features, stats->window_start_ns);
+                }
+            }
+        }
+    }
+
+    if (csv_file) {
+        fclose(csv_file);
+        csv_file = NULL;
+    }
+
+    if (json_file) {
+        fclose(json_file);
+        json_file = NULL;
+    }
 }

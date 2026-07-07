@@ -3,7 +3,10 @@
 
 #include "../ebpf/include/collector.h"
 
-void telemetry_init(void);
+/* workload_class: label attached to every CSV row this run produces
+ * (e.g. "seq_read", "rand_write_qd16"). Pass NULL for unlabeled/general
+ * collection runs. */
+void telemetry_init(const char *workload_class);
 void telemetry_process_event(const struct nestor_event *event);
 void telemetry_cleanup(void);
 

@@ -1,17 +1,48 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <signal.h>
 #include <unistd.h>
+#include <limits.h>
+#include <libgen.h>
+#include <linux/limits.h>
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "telemetry.h"
 #include "../ebpf/include/collector.h"
 
-#define BPF_OBJECT_PATH "../ebpf/build/collector.bpf.o"
+#define BPF_OBJECT_PATH "collector.bpf.o"
+
+/* Resolve BPF_OBJECT_PATH relative to the loader binary's own
+ * directory instead of cwd. The collection script cd's into a fixed
+ * dataset directory before running the loader (so telemetry.c's
+ * relative CSV/JSON paths land in one place); without this, that cd
+ * would also break BPF object loading, since it used to be resolved
+ * relative to cwd too. */
+static void resolve_bpf_object_path(char *out, size_t out_sz)
+{
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+
+    if (len == -1) {
+        /* Fallback: old cwd-relative behavior */
+        snprintf(out, out_sz, "%s", BPF_OBJECT_PATH);
+        return;
+    }
+    exe_path[len] = '\0';
+
+    /* dirname() may modify its argument, exe_path is a scratch copy */
+    char *dir = dirname(exe_path);
+    snprintf(out, out_sz, "%s/%s", dir, BPF_OBJECT_PATH);
+}
 
 //keep them global to clean up on exit
 static struct bpf_object *obj = NULL; 
@@ -46,6 +77,7 @@ int main(int argc, char **argv)
     signal(SIGTERM, handle_signal);
 
     bool filtering = argc > 1;
+    const char *workload_class = (argc > 2) ? argv[2] : NULL;
 
     printf("Nestor loader starting...\n");
 
@@ -55,7 +87,16 @@ int main(int argc, char **argv)
         printf("No device filter set, collecting from all devices.\n");
     }
 
-    obj = bpf_object__open_file(BPF_OBJECT_PATH, NULL); //open bpf file for verification/modification
+    if (workload_class) {
+        printf("Labeling collected samples as workload_class: %s\n", workload_class);
+    } else {
+        printf("No workload_class given, samples will be labeled 'unlabeled'.\n");
+    }
+
+    char bpf_obj_path[PATH_MAX];
+    resolve_bpf_object_path(bpf_obj_path, sizeof(bpf_obj_path));
+
+    obj = bpf_object__open_file(bpf_obj_path, NULL); //open bpf file for verification/modification
 
     if (!obj) {
         fprintf(stderr, "Failed to open BPF object file\n");
@@ -165,7 +206,7 @@ int main(int argc, char **argv)
     return EXIT_FAILURE;
     }
 
-    telemetry_init();
+    telemetry_init(workload_class);
 
 
     while (!exiting) {
