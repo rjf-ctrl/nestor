@@ -29,6 +29,10 @@ struct telemetry_snapshot {
     double read_write_ratio;
     double avg_queue_depth;
     double burstiness;
+
+    /* flush/discard/write-zeroes/unknown ops - tracked, not discarded */
+    __u64 other_iops;
+    double avg_other_latency_us;
 };
 
 

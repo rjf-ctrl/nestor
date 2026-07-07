@@ -31,4 +31,15 @@ struct nestor_event {
     char disk_name[32];
 };
 
+/*
+ * Optional collection-time filter.
+ * When filter_enabled is 0, every device is tracked (use this for
+ * realistic/noisy validation runs). When set to 1, only disk_name
+ * is tracked (use this for clean single-workload training collection).
+ */
+struct collector_config {
+    char disk_name[32];
+    __u8 filter_enabled;
+};
+
 #endif /* __COLLECTOR_H */

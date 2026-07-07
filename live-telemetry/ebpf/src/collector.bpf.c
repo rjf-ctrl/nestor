@@ -75,6 +75,18 @@ static __always_inline void fill_request_info(struct request *rq,     //always_i
     bpf_core_read_str(info->disk_name, sizeof(info->disk_name), name);
 }
 
+//compares two disk_name buffers (max 32 bytes, NUL-terminated)
+static __always_inline int disk_name_eq(const char *a, const char *b)
+{
+    for (int i = 0; i < 32; i++) {
+        if (a[i] != b[i])
+            return 0;
+        if (a[i] == '\0')
+            break;
+    }
+    return 1;
+}
+
 //------------------------------MAPS----------------------------------------------------------------------
 //request tracking map. Key is request pointer, value is request_info
 struct {
@@ -96,6 +108,7 @@ struct {
 } events SEC(".maps");
 
 struct device_queue_depth {
+    struct bpf_spin_lock lock;
     __u32 depth;
 };
 
@@ -108,6 +121,17 @@ struct {
 
 } queue_depth_map SEC(".maps");
 
+//single-entry config map: set by loader.c to optionally restrict
+//collection to one target device
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+
+    __type(key, __u32);
+    __type(value, struct collector_config);
+
+} config_map SEC(".maps");
+
 //--------------------------BPF PROGRAMS--------------------------------------------------------------------------
 
 //issue request
@@ -116,13 +140,21 @@ int BPF_PROG(handle_insert, struct request *rq){  //Because our probe runs at th
 
     struct request_info info = {}; //zero-intialisation to avoid verifier complaints abt uninitialised memory
     fill_request_info(rq, &info);
+
+    __u32 cfg_key = 0;
+    struct collector_config *cfg = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (cfg && cfg->filter_enabled && !disk_name_eq(info.disk_name, cfg->disk_name))
+        return 0; //not the target device, skip tracking entirely
+
     struct device_queue_depth *qd;
 
     qd = bpf_map_lookup_elem(&queue_depth_map, info.disk_name);
 
     if (qd) {
+        bpf_spin_lock(&qd->lock);
         qd->depth++;
         info.queue_depth = qd->depth;
+        bpf_spin_unlock(&qd->lock);
     } else {
         struct device_queue_depth init = {
             .depth = 1,
@@ -165,10 +197,12 @@ int BPF_PROG(handle_complete, struct request *rq){
                                 info->disk_name);
 
         if (qd) {
+            bpf_spin_lock(&qd->lock);
             if (qd->depth > 1)
                 qd->depth--;
             else
-                bpf_map_delete_elem(&queue_depth_map, info->disk_name);
+                qd->depth = 0;
+            bpf_spin_unlock(&qd->lock);
         }
 
         bpf_map_delete_elem(&request_map, &rq);
@@ -187,10 +221,12 @@ int BPF_PROG(handle_complete, struct request *rq){
 
     qd = bpf_map_lookup_elem(&queue_depth_map,info->disk_name);
     if (qd) {
+        bpf_spin_lock(&qd->lock);
         if (qd->depth > 1)
             qd->depth--;
         else
-            bpf_map_delete_elem(&queue_depth_map, info->disk_name);
+            qd->depth = 0;
+        bpf_spin_unlock(&qd->lock);
     }
     
 
