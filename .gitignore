@@ -5,3 +5,7 @@ data/*.csv
 project.md
 live-telemetry/include/vmlinux.h
 docs/
+*.o
+eda_output/
+*.csv
+*jsonl
