@@ -1,28 +1,28 @@
-#define _POSIX_C_SOURCE 200809L
+#define _POSIX_C_SOURCE 200809L //enable POSIX APIs for readlink() and dirname()
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include <signal.h>
+#include <signal.h> // signal handling: SIGINT, SIGTERM (signals=asynchronous exceptions and system level interrupts)
 #include <unistd.h>
 #include <limits.h>
 #include <libgen.h>
-#include <linux/limits.h>
+#include <linux/limits.h> //linux specific limits: PATH_MAX
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
-#include <bpf/libbpf.h>
-#include <bpf/bpf.h>
+#include <bpf/libbpf.h> //main libbpf API for userspace progs
+#include <bpf/bpf.h> //lowlevel bpf syscall APIS
 #include "telemetry.h"
 #include "../ebpf/include/collector.h"
 
 #define BPF_OBJECT_PATH "collector.bpf.o"
 
-/* Resolve BPF_OBJECT_PATH relative to the loader binary's own
- * directory instead of cwd. The collection script cd's into a fixed
+/* Resolve BPF_OBJECT_PATH(of collector.bpf.o) relative to the loader's own
+ * directory instead of current working directory(cwd). The script cd's into a fixed
  * dataset directory before running the loader (so telemetry.c's
  * relative CSV/JSON paths land in one place); without this, that cd
  * would also break BPF object loading, since it used to be resolved
@@ -30,6 +30,8 @@
 static void resolve_bpf_object_path(char *out, size_t out_sz)
 {
     char exe_path[PATH_MAX];
+    //linux exposes /proc/self/exe as a symbolic link to the executable of the current process.
+    // readlink() reads the target of the symlink and copies the number of bytes written to exe_path.
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
 
     if (len == -1) {

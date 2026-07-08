@@ -1,10 +1,10 @@
-#include "../include/vmlinux.h"
+#include "../include/vmlinux.h"  //generated from the running kernel's btf 
 
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_core_read.h>
-#include <bpf/bpf_tracing.h>
+#include <bpf/bpf_helpers.h>  //conatains helper definitions: SEC(), bpf_map_lookup_elem(), bpf_ringbuf_submit()
+#include <bpf/bpf_core_read.h> //BPF_CORE_READ(...) enables CO-RE
+#include <bpf/bpf_tracing.h> //contains BPF_PROG() macro for defining BPF programs
 
-#include "../include/collector.h"
+#include "../include/collector.h"  //shared header between kernel and user space: nestor_event, collector_config
 
 /*
  * Block operation encoding.
@@ -14,7 +14,7 @@
 
 
 #define REQ_OP_BITS   8
-#define REQ_OP_MASK   ((1U << REQ_OP_BITS) - 1)
+#define REQ_OP_MASK   ((1U << REQ_OP_BITS) - 1)  //get lowest 8 bits of cmd_flags to get operation type
 #define REQ_OP_READ   0
 #define REQ_OP_WRITE  1
 
@@ -34,7 +34,6 @@ struct request_info {
 static __always_inline __u8 get_io_operation(struct request *rq)
 {
     __u32 cmd_flags = BPF_CORE_READ(rq, cmd_flags);
-
     __u32 op = cmd_flags & REQ_OP_MASK;
     
     switch (op) {
@@ -56,7 +55,7 @@ static __always_inline __u8 get_io_operation(struct request *rq)
 //--------------------------------------------------------------------------------------------------------
 //ensures that every request_info is fully initialised in one place
 static __always_inline void fill_request_info(struct request *rq,     //always_inline so that compiler directly copies code into kprobe rather than create a function call
-                                              struct request_info *info)  //veriier likes small predicatable code and also avoid function call overhead
+                                              struct request_info *info)  //verifier likes small predicatable code and also avoid function call overhead
 {
     //time when reuquest enters scheduler
     info->insert_time_ns = bpf_ktime_get_ns();  
@@ -72,9 +71,11 @@ static __always_inline void fill_request_info(struct request *rq,     //always_i
 
     const char *name = BPF_CORE_READ(rq, q, disk, disk_name);
 
-    bpf_core_read_str(info->disk_name, sizeof(info->disk_name), name);
+    bpf_core_read_str(info->disk_name, sizeof(info->disk_name), name);  //CO-RE + safe kernel equivalent of strncpy().
 }
 
+
+//--------------------------------------------------------------------------------------------------------
 //compares two disk_name buffers (max 32 bytes, NUL-terminated)
 static __always_inline int disk_name_eq(const char *a, const char *b)
 {
@@ -107,11 +108,16 @@ struct {
     __uint(max_entries, 1 << 20);   // 1 MB ring buffer
 } events SEC(".maps");
 
+
+//track the number of outstanding requests for each device. 
+//spinlock to prevent race when multiple CPUs issue requests to same device and
+//queue_depth_map is updated concurrently.
 struct device_queue_depth {
     struct bpf_spin_lock lock;
     __u32 depth;
 };
 
+//key: device-name, value: device_queue_depth
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
@@ -121,8 +127,8 @@ struct {
 
 } queue_depth_map SEC(".maps");
 
-//single-entry config map: set by loader.c to optionally restrict
-//collection to one target device
+//pass config from loader.c to collector.bpf.c.
+//Single entry map, key is always 0, value is collector_config struct.
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -151,11 +157,15 @@ int BPF_PROG(handle_insert, struct request *rq){  //Because our probe runs at th
     qd = bpf_map_lookup_elem(&queue_depth_map, info.disk_name);
 
     if (qd) {
-        bpf_spin_lock(&qd->lock);
+        bpf_spin_lock(&qd->lock); //acquire lock so CPUs dont update simultaneously
         qd->depth++;
         info.queue_depth = qd->depth;
-        bpf_spin_unlock(&qd->lock);
+        bpf_spin_unlock(&qd->lock); //release lock
     } else {
+        //race could occur here if two CPUs issue requests to same device at same time for the 1st time
+        //can fix by pre-populating the map in loader.c in userspace
+        //fix in v2
+        //would give inaccurate queue_d for first request, but all subsequent requests will be fine
         struct device_queue_depth init = {
             .depth = 1,
         };
@@ -186,7 +196,11 @@ int BPF_PROG(handle_complete, struct request *rq){
     __u64 completion_time_ns = bpf_ktime_get_ns();
     __u64 latency_ns = completion_time_ns - info->insert_time_ns;
 
-    
+    //reserve space for nestor_event in ring buffer.
+    //if buffer is full, we drop the event and just decrementn qdepth for that device 
+    //and delete map entry 
+    //tradeoff to avoid blocking the kernel and causing deadlock 
+    //If eBPF program produces events faster than the userspace loader can consume them.
     struct nestor_event *event;
     event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
 
@@ -215,7 +229,8 @@ int BPF_PROG(handle_complete, struct request *rq){
     event->sector             = info->sector;
     event->bytes              = info->bytes;
     event->op                 = info->op;
-    __builtin_memcpy(event->disk_name, info->disk_name,sizeof(info->disk_name));
+    __builtin_memcpy(event->disk_name, info->disk_name,sizeof(info->disk_name));  //no need for bpf_core, neither locations in kernel memory
+    
     struct device_queue_depth *qd;
     event->queue_depth = info->queue_depth;
 
@@ -231,9 +246,6 @@ int BPF_PROG(handle_complete, struct request *rq){
     
 
     bpf_ringbuf_submit(event, 0);
-
-
-    
 
     bpf_map_delete_elem(&request_map, &rq);
     return 0;    
