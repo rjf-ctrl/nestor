@@ -3,151 +3,137 @@ set -euo pipefail
 
 source ./dataset_config.sh
 
-mkdir -p "$(dirname "$TESTFILE")"
+###############################################################################
+# Create output directories
+###############################################################################
 
-echo "======================================="
-echo "      Nestor Dataset Generation"
-echo "======================================="
+mkdir -p "$OUTPUT_ROOT"
+mkdir -p "$TELEMETRY_DIR"
+mkdir -p "$FIO_RESULTS_DIR"
+mkdir -p "$LOG_DIR"
 
-TOTAL_RUNS=0
+###############################################################################
+# Count total benchmark runs
+###############################################################################
 
-TOTAL_EXPECTED=$(( \
-    ${#WORKLOAD_CLASSES[@]} * \
-    ${#BLOCK_SIZES[@]} * \
-    ${#QUEUE_DEPTHS[@]} * \
-    ${#NUM_JOBS[@]} * \
-    REPEATS \
-))
+TOTAL_RUNS=$(( \
+    ${#WORKLOAD_CLASSES[@]} \
+    * ${#BLOCK_SIZES[@]} \
+    * ${#QUEUE_DEPTHS[@]} \
+    * ${#NUM_JOBS[@]} \
+    * ${#SCHEDULERS[@]} \
+    * REPEATS ))
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKLOAD_DIR="$SCRIPT_DIR/workloads"
+CURRENT_RUN=1
+START_TIME=$(date +%s)
 
-LOADER_PID=""
+###############################################################################
 
-cleanup() {
-    if [[ -n "${LOADER_PID:-}" ]]; then
-        sudo kill -INT "$LOADER_PID" 2>/dev/null || true
-        wait "$LOADER_PID" 2>/dev/null || true
-    fi
-}
+echo "==============================================="
+echo "     Nestor Scheduler Benchmark"
+echo "==============================================="
+echo
+echo "Total runs : $TOTAL_RUNS"
+echo
 
-trap cleanup EXIT INT TERM
+###############################################################################
+# Benchmark Loop
+###############################################################################
 
-for workload in "${WORKLOAD_CLASSES[@]}"; do
-    
-    TEMPLATE="$WORKLOAD_DIR/${workload}.fio"
+for WORKLOAD in "${WORKLOAD_CLASSES[@]}"; do
 
-    if [[ ! -f "$TEMPLATE" ]]; then
-        echo "Missing template: $TEMPLATE"
-        exit 1
-    fi
+    for BS in "${BLOCK_SIZES[@]}"; do
 
-    for bs in "${BLOCK_SIZES[@]}"; do
-        for qd in "${QUEUE_DEPTHS[@]}"; do
-            for jobs in "${NUM_JOBS[@]}"; do
-                for ((rep=1; rep<=REPEATS; rep++)); do
+        for QD in "${QUEUE_DEPTHS[@]}"; do
 
-                    TOTAL_RUNS=$((TOTAL_RUNS+1))
+            for JOBS in "${NUM_JOBS[@]}"; do
 
-                    echo
-                    echo "===================================================="
-                    echo "Run $TOTAL_RUNS / $TOTAL_EXPECTED"
-                    echo "Workload : $workload"
-                    echo "BlockSize: $bs"
-                    echo "QD       : $qd"
-                    echo "Jobs     : $jobs"
-                    echo "Repeat   : $rep/$REPEATS"
-                    echo "===================================================="
+                ################################################################
+                # Prepare workload ONCE
+                ################################################################
 
-                    #######################################################
-                    # Prepare test file
-                    #######################################################
+                ./prepare_workload.sh
 
-                    ./prepare_workload.sh \
-                        "$workload" \
-                        "$bs" \
-                        "$qd" \
-                        "$jobs"
+                ################################################################
+                # Benchmark every scheduler on the SAME workload
+                ################################################################
 
-                    #######################################################
-                    # Start collector
-                    #######################################################
+                for SCHEDULER in "${SCHEDULERS[@]}"; do
 
+                    for ((REPEAT=1; REPEAT<=REPEATS; REPEAT++)); do
+                        
+                        NOW=$(date +%s)
+                        ELAPSED=$((NOW - START_TIME))
 
-                    echo "Starting collector..."
+                        AVG_PER_RUN=$(( ELAPSED / CURRENT_RUN ))
 
-                    sudo "$LOADER" "$DEVICE" "$workload" &
+                        REMAINING_RUNS=$(( TOTAL_RUNS - CURRENT_RUN + 1 ))
+                        ETA_SECONDS=$(( AVG_PER_RUN * REMAINING_RUNS ))
 
-                    LOADER_PID=$!
+                        ETA_HOURS=$(( ETA_SECONDS / 3600 ))
+                        ETA_MINUTES=$(( (ETA_SECONDS % 3600) / 60 ))
 
-                    sleep "$LOADER_STARTUP_DELAY"
+                        clear
 
-                    if ! kill -0 "$LOADER_PID" 2>/dev/null; then
-                        echo "Collector failed to start."
-                        exit 1
-                    fi
+                        echo "===================================================="
+                        echo "Run        : $CURRENT_RUN / $TOTAL_RUNS"
+                        echo "Workload   : $WORKLOAD"
+                        echo "Scheduler  : $SCHEDULER"
+                        echo "Block Size : $BS"
+                        echo "QueueDepth : $QD"
+                        echo "Jobs       : $JOBS"
+                        echo "Repeat     : $REPEAT"
+                        echo "ETA        : ${ETA_HOURS}h ${ETA_MINUTES}m"
+                        echo "===================================================="
+                        echo
 
-                    #######################################################
-                    # Execute workload
-                    #######################################################
+                        ########################################################
+                        # Switch scheduler
+                        ########################################################
 
-                    echo "Running workload..."
-                    echo "Running:"
-                    echo fio "$TEMPLATE" \
-                        --filename="$TESTFILE" \
-                        --bs="$bs" \
-                        --iodepth="$qd" \
-                        --numjobs="$jobs" \
-                        --runtime="$RUNTIME"
+                        ./set_scheduler.sh "$SCHEDULER"
 
+                        ########################################################
+                        # Execute workload
+                        ########################################################
 
-                    if ! fio "$TEMPLATE" \
-                        --filename="$TESTFILE" \
-                        --direct=1 \
-                        --bs="$bs" \
-                        --iodepth="$qd" \
-                        --numjobs="$jobs" \
-                        --runtime="$RUNTIME"; then
+                        ./run_workload.sh \
+                            "$WORKLOAD" \
+                            "$BS" \
+                            "$QD" \
+                            "$JOBS" \
+                            "$SCHEDULER" \
+                            "$REPEAT"
 
-                        echo "fio failed."
+                        ########################################################
+                        # Cooldown
+                        ########################################################
 
-                        sudo kill -INT "$LOADER_PID"
-                        wait "$LOADER_PID" || true
-                        LOADER_PID=""
+                        echo
+                        echo "Cooling down..."
 
-                        exit 1
-                    fi
+                        sleep "$COOLDOWN_TIME"
 
-                    #######################################################
-                    # Allow collector to flush remaining events
-                    #######################################################
+                        ((CURRENT_RUN++))
 
-                    sleep "$POST_WORKLOAD_DELAY"
-
-                    #######################################################
-                    # Stop collector
-                    #######################################################
-
-                    echo "Stopping collector..."
-
-                    sudo kill -INT "$LOADER_PID"
-                    wait "$LOADER_PID" || true
-                    LOADER_PID=""
-
-                    #######################################################
-                    # Cooldown
-                    #######################################################
-
-                    
+                    done
 
                 done
+
             done
+
         done
+
     done
+
 done
 
+###############################################################################
+
 echo
-echo "======================================="
-echo "Dataset generation complete."
-echo "Total experiments: $TOTAL_RUNS"
-echo "======================================="
+echo "==============================================="
+echo "Benchmark Complete"
+echo "==============================================="
+echo
+echo "Total runs completed : $((CURRENT_RUN-1))"
+echo

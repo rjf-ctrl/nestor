@@ -3,34 +3,58 @@ set -euo pipefail
 
 source ./dataset_config.sh
 
-echo "Preparing workload..."
+echo "======================================="
+echo "Preparing workload"
+echo "======================================="
 
-# Create parent directory if it doesn't exist
+###############################################################################
+# Create test directory
+###############################################################################
+
 mkdir -p "$(dirname "$TESTFILE")"
 
-# Remove any existing test file
+###############################################################################
+# Remove previous test file
+###############################################################################
+
 rm -f "$TESTFILE"
 
-# Ensure all pending writes are flushed
 sync
 
-# Create a fresh test file
+###############################################################################
+# Generate fresh random data
+###############################################################################
+
+echo "Creating ${TESTFILE_SIZE} test file..."
+
 dd if=/dev/urandom \
    of="$TESTFILE" \
    bs=1M \
    count=4096 \
    status=progress
 
-# Flush file creation to disk
 sync
 
-# Force eviction of clean cached pages so the very next fio run can't
-# be served from RAM instead of hitting the device
+###############################################################################
+# Drop page cache
+###############################################################################
+
+echo "Dropping page cache..."
+
 echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
-# Allow the storage device to settle before the next run
+###############################################################################
+# Allow device to settle
+###############################################################################
+
 sleep 1
 
-echo "Test file ready:"
-echo "  File : $TESTFILE"
-echo "  Size : $TESTFILE_SIZE"
+###############################################################################
+# Summary
+###############################################################################
+
+echo
+echo "Workload prepared successfully."
+echo "File        : $TESTFILE"
+echo "Size        : $TESTFILE_SIZE"
+echo
