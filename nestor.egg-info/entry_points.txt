@@ -1,0 +1,2 @@
+[console_scripts]
+nestor = cli.main:main

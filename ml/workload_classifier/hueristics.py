@@ -1,9 +1,16 @@
 import json
-
+from pathlib import Path
 
 class SchedulerAdvisor:
 
-    def __init__(self, json_file="scheduler_heuristics.json"):
+    def __init__(self, json_file=None):
+
+        if json_file is None:
+            json_file = (
+                Path(__file__).resolve().parent
+                / "scheduler_heuristics.json"
+            )
+
         with open(json_file, "r") as f:
             self.heuristics = json.load(f)
 
@@ -12,9 +19,10 @@ class SchedulerAdvisor:
         recommendations = self.heuristics.get(workload_class)
 
         if recommendations is None:
-            print(f"No heuristic available for '{workload_class}'.")
-            return
-
+            raise ValueError(
+                f"No heuristic available for '{workload_class}'."
+            )
+        """
         print("=" * 60)
         print(f"Detected workload : {workload_class}")
         print("=" * 60)
@@ -26,6 +34,8 @@ class SchedulerAdvisor:
             print(f"{i}. {rec['scheduler']}")
             print(f"   Confidence : {rec['confidence']}")
             print(f"   Reason     : {rec['reason']}\n")
+        """
+        return recommendations
 
 
 if __name__ == "__main__":

@@ -9,3 +9,6 @@ docs/
 eda_output/
 *.csv
 *jsonl
+*.pkl
+*.json
+*.log

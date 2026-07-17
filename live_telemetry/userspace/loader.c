@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <libgen.h>
+#include <errno.h>  
 #include <linux/limits.h> //linux specific limits: PATH_MAX
 
 #ifndef PATH_MAX
@@ -78,8 +79,17 @@ int main(int argc, char **argv)
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
-    bool filtering = argc > 1;
-    const char *workload_class = (argc > 2) ? argv[2] : NULL;
+   bool filtering = argc > 1;
+
+    const char *workload_class =
+        (argc > 2 && argv[2][0] != '\0')
+            ? argv[2]
+            : NULL;
+
+    const char *output_csv =
+    (argc > 3 && argv[3][0] != '\0')
+        ? argv[3]
+        : "/tmp/nestor/nestor_dataset.csv";
 
     printf("Nestor loader starting...\n");
 
@@ -208,16 +218,16 @@ int main(int argc, char **argv)
     return EXIT_FAILURE;
     }
 
+    telemetry_set_csv_path(output_csv);
     telemetry_init(workload_class);
 
 
     while (!exiting) {
         int err = ring_buffer__poll(rb, 100);
-
-    if (err < 0) {
-        fprintf(stderr, "Ring buffer polling failed: %d\n", err);
-        break;
-    }
+        if (err < 0 && err != -EINTR) {
+            fprintf(stderr, "Ring buffer polling failed: %d\n", err);
+            break;
+        }
     }
     
     telemetry_cleanup();

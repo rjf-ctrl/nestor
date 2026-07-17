@@ -38,5 +38,7 @@ struct telemetry_snapshot {
     double avg_other_latency_us;
 };
 
+void telemetry_set_csv_path(const char *path);
+
 
 #endif

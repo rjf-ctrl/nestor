@@ -1,0 +1,15 @@
+[project]
+name = "nestor"
+version = "0.1.0"
+description = "Intelligent Linux Storage Workload Advisor"
+requires-python = ">=3.10"
+
+[project.scripts]
+nestor = "cli.main:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cli*", "live_telemetry*", "ml*"]

@@ -7,16 +7,23 @@
 #include <time.h>
 #include <stdbool.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #include "telemetry.h"
 
 #define WINDOW_NS 1000000000ULL
-#define CSV_PATH "nestor_dataset.csv"
-#define JSON_PATH "telemetry.jsonl"
+#define JSON_PATH "/tmp/nestor/telemetry.jsonl"
 #define MAX_DEVICES 16
 #define MAX_LATENCY_SAMPLES 20000
 #define BURST_HISTORY 30
 #define MAX_WINDOW_REQUESTS 16384
+
+static const char *csv_path = "/tmp/nestor/nestor_dataset.csv";
+void telemetry_set_csv_path(const char *path)
+{
+    if (path && path[0] != '\0')
+        csv_path = path;
+}
 
 static int compare_u32(const void *a, const void *b){
     __u32 x = *(__u32 *)a;
@@ -411,9 +418,6 @@ static void write_features_csv(const struct telemetry_state *stats,
     if (!csv_file)
         return;
 
-    if (strcmp(g_workload_class, "unlabeled") == 0)
-        return;
-
     fprintf(csv_file,
         "%s,%llu,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%.3f\n",
         g_workload_class,
@@ -467,6 +471,9 @@ static void reset_window(struct telemetry_state *stats)
     
 void telemetry_init(const char *workload_class)
 {
+    if (mkdir("/tmp/nestor", 0755) == -1 && errno != EEXIST) {
+        perror("mkdir");
+    }
     printf("Telemetry initialized.\n");
     srand((unsigned int)time(NULL));
 
@@ -475,22 +482,20 @@ void telemetry_init(const char *workload_class)
         g_workload_class[sizeof(g_workload_class) - 1] = '\0';
     }
 
-    if (strcmp(g_workload_class, "unlabeled") == 0) {
-        printf("Ignoring unlabeled run; CSV output disabled.\n");
-        csv_file = NULL;
-    } else {
-        /* Check size before opening in append mode so we know whether this
-         * is a fresh file (needs a header) or one we're appending more
-         * samples to (header already there from a previous run). */
-        struct stat st;
-        bool csv_has_content = (stat(CSV_PATH, &st) == 0 && st.st_size > 0);
+    /* CSV is always written, labeled or not - live commands (classify/
+     * recommend/apply/monitor) never pass a workload_class and rely on
+     * this file existing so collector.py can read features back. Dataset
+     * generation writes to a separate path (nestor_dataset.csv) via
+     * collect_dataset.sh, so there's no risk of unlabeled live-run rows
+     * polluting the training set. */
+    struct stat st;
+    bool csv_has_content = (stat(csv_path, &st) == 0 && st.st_size > 0);
 
-        csv_file = fopen(CSV_PATH, "a");
-        if (!csv_file) {
-            fprintf(stderr, "Failed to open dataset file %s\n", CSV_PATH);
-        } else if (!csv_has_content) {
-            write_csv_header();
-        }
+    csv_file = fopen(csv_path, "a");
+    if (!csv_file) {
+        fprintf(stderr, "Failed to open dataset file %s\n", csv_path);
+    } else if (!csv_has_content) {
+        write_csv_header();
     }
 
     /* JSON output is for debugging only now that CSV is the dataset
